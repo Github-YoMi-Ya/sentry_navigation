@@ -1,0 +1,123 @@
+#!/bin/bash
+################################################################################
+#
+# Copyright (c) 2017 Intel Corporation
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+# Reference: https://github.com/IntelRealSense/librealsense/blob/master/doc/distribution_linux.md
+
+set -e
+
+DEFAULT_INSTALL=true
+BINARY_INSTALL=true
+
+CURRENT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+
+install_librealsense_binary()
+{
+  # Install librealsense
+  echo "Install server public key for librealsense"
+
+  # Register the server's public key
+  # sudo apt-key adv --keyserver keys.gnupg.net --recv-key C8B3A55A6F3EFCDE || sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-key C8B3A55A6F3EFCDE
+  # TODO: always fail to download key from server, pre-download and use local key instead.
+  sudo apt-key add "${CURRENT_DIR}"/20-C8B3A55A6F3EFCDE
+
+  # Add the server to the list of repositories
+  sudo sh -c 'echo "deb http://realsense-hw-public.s3.amazonaws.com/Debian/apt-repo `lsb_release -cs` main" > /etc/apt/sources.list.d/librealsense.list'
+
+  # Install the libraries
+  sudo apt-get update && sudo apt-get install -y librealsense2-dkms librealsense2-utils librealsense2-dev
+}
+
+release_package()
+{
+  echo "Copy librealsense key to rootfs"
+  SOURCE_DIR=$1
+  RELEASE_DIR=$2
+  mkdir -p "${RELEASE_DIR}"
+  cp "${SOURCE_DIR}"/20-C8B3A55A6F3EFCDE "${RELEASE_DIR}"
+
+  # add install command to install.sh
+  declare -f install_librealsense_binary>> "${RELEASE_DIR}"/install.sh
+  echo "install_librealsense_binary" >> "${RELEASE_DIR}"/install.sh
+
+  #TODO: if we can download librealsense deb files, we needn't add key for librealsense
+}
+
+#
+# Build opencv
+#
+build_from_src()
+{
+  echo "Build librealsense..."
+  local TARGET_DIR=$1
+  cd "${TARGET_DIR}"
+  if [[ ! -d librealsense ]]
+  then
+    git clone --depth 1 https://github.com/IntelRealSense/librealsense.git -b v2.17.1
+  fi
+  sudo apt-get install -y \
+    libudev-dev \
+    libusb-1.0-0-dev \
+    pkg-config \
+    libgtk-3-dev \
+    libglfw3-dev
+  cd librealsense
+  mkdir -p build
+  cd build
+  cmake ../
+  make -j8
+  sudo make uninstall
+  sudo make install
+  cd ../
+  sudo cp config/99-realsense-libusb.rules /etc/udev/rules.d/
+  sudo udevadm control --reload-rules && udevadm trigger
+}
+
+
+#
+# Main entry to build deps
+#
+main()
+{
+  if [[ "$DEFAULT_INSTALL" != "true" ]]; then
+    echo "Default not install, skip"
+    exit
+  fi
+
+  TARGET_DIR=$1
+  RELEASE_OPT=$2
+  RELEASE_DIR=$3
+
+  # Install files to rootfs with --release
+  if [[ "$RELEASE_OPT" == "--release" && "$RELEASE_DIR" != "" ]];then
+    CURRENT_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+    release_package ${CURRENT_DIR} ${RELEASE_DIR}
+    exit
+  fi
+
+  if [[ "$BINARY_INSTALL" == "true" ]]; then
+    install_librealsense_binary
+  else
+    if [ ! -d "${TARGET_DIR}" ]; then
+      mkdir -p "${TARGET_DIR}"
+      echo "No such directory, create \"${TARGET_DIR}\""
+    fi
+    build_from_src "${TARGET_DIR}"
+  fi
+}
+
+main "$@"

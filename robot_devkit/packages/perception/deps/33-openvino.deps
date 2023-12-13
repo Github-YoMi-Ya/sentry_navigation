@@ -1,0 +1,229 @@
+#!/bin/bash
+# Reference:
+#   https://github.com/intel/ros2_openvino_toolkit/blob/devel/script/environment_setup_binary.sh
+#   https://github.com/intel/ros2_openvino_toolkit/blob/devel/doc/BINARY_VERSION_README.md
+
+set -e
+
+DEFAULT_INSTALL=true
+
+#
+# build openvino binary
+#
+build_openvino()
+{
+  echo "Build openvino binary..."
+  local TARGET_PATH=$1
+  cd "$TARGET_PATH"
+
+  # Install openvino toolkit
+  mkdir -p openvino_binart
+  cd openvino_binart
+  if [ ! -f "l_openvino_toolkit_p_2019.1.144/install_openvino_dependencies.sh" ]; then
+    wget -t 3 -c http://registrationcenter-download.intel.com/akdlm/irc_nas/15512/l_openvino_toolkit_p_2019.1.144.tgz
+    tar -xvf l_openvino_toolkit_p_2019.1.144.tgz
+  fi
+  cd l_openvino_toolkit_p_2019.1.144
+  sudo  ./install_openvino_dependencies.sh
+  sed -i 's/ACCEPT_EULA=decline/ACCEPT_EULA=accept/g' silent.cfg
+  if [ ! -d /opt/intel/openvino ];then
+    sudo ./install.sh --silent silent.cfg
+  else
+    echo "WARNING: Destination directory already exists."
+  fi
+
+  # Build sample code under openvino toolkit
+  # shellcheck disable=SC1091
+  . /opt/intel/openvino/bin/setupvars.sh
+  cd "$TARGET_PATH"
+  mkdir -p openvino_binart_example
+  cd openvino_binart_example
+  mkdir -p build && cd build
+  cmake /opt/intel/openvino/deployment_tools/inference_engine/samples/ && make && cd ..
+  sudo /bin/cp -rf build /opt/intel/openvino/deployment_tools/inference_engine/samples/
+
+  # Download and convert a trained model to produce an optimized Intermediate Representation (IR) of the model
+  if [ ! -f /opt/openvino_toolkit/models/segmentation/output/FP32/frozen_inference_graph.bin ]; then
+    # Workaround: pre-install requirements with timeout=600 to fix
+    # pip timeout issue when run install_prerequesites.sh command
+    cd /opt/intel/openvino/deployment_tools/model_optimizer/
+    sudo apt-get -y install python3-pip
+    sudo python3 -m pip --default-timeout=600 install -r requirements.txt
+    cd /opt/intel/openvino/deployment_tools/model_optimizer/install_prerequisites
+    sudo ./install_prerequisites.sh
+    mkdir -p ~/Downloads/models
+    cd ~/Downloads/models
+    wget -t 3 -c http://download.tensorflow.org/models/object_detection/mask_rcnn_inception_v2_coco_2018_01_28.tar.gz
+    tar -zxvf mask_rcnn_inception_v2_coco_2018_01_28.tar.gz
+    cd mask_rcnn_inception_v2_coco_2018_01_28
+    sudo python3 -m pip --default-timeout=600 install -U numpy
+
+    # TODO: Workaround for fixing Graph object has no attribute node
+    # delete here when openvino release new version for final fixing.
+    # Ref to: https://software.intel.com/en-us/comment/1947039#comment-1947039
+    sudo python3 -m pip install networkx==2.3
+    sudo python3 /opt/intel/openvino/deployment_tools/model_optimizer/mo_tf.py --input_model frozen_inference_graph.pb --tensorflow_use_custom_operations_config /opt/intel/openvino/deployment_tools/model_optimizer/extensions/front/tf/mask_rcnn_support.json --tensorflow_object_detection_api_pipeline_config pipeline.config --reverse_input_channels --output_dir /opt/openvino_toolkit/models/segmentation/output/FP32
+  fi
+
+  # mobilenet-ssd model
+  if [ ! -f /opt/intel/openvino/deployment_tools/tools/model_downloader/object_detection/common/mobilenet-ssd/caffe/mobilenet-ssd.caffemodel ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 ./downloader.py --num_attempts 3 --name mobilenet-ssd
+  fi
+
+  #FP32 python3 [buffer]
+  if [ ! -f /opt/openvino_toolkit/models/object_detection/mobilenet-ssd/caffe/output/FP32/mobilenet-ssd.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 /opt/intel/openvino/deployment_tools/model_optimizer/mo.py --input_model /opt/intel/openvino/deployment_tools/tools/model_downloader/object_detection/common/mobilenet-ssd/caffe/mobilenet-ssd.caffemodel --output_dir /opt/openvino_toolkit/models/object_detection/mobilenet-ssd/caffe/output/FP32 --mean_values [127.5,127.5,127.5] --scale_values [127.5]
+  fi
+
+  #FP16 precision model
+  if [ ! -f /opt/openvino_toolkit/models/object_detection/mobilenet-ssd/caffe/output/FP16/mobilenet-ssd.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 /opt/intel/openvino/deployment_tools/model_optimizer/mo.py --input_model /opt/intel/openvino/deployment_tools/tools/model_downloader/object_detection/common/mobilenet-ssd/caffe/mobilenet-ssd.caffemodel --output_dir /opt/openvino_toolkit/models/object_detection/mobilenet-ssd/caffe/output/FP16 --data_type=FP16 --mean_values [127.5,127.5,127.5] --scale_values [127.5]
+  fi
+
+  # download the optimized Intermediate Representation (IR) of model (excute once)
+  if [ ! -f /opt/openvino_toolkit/models/face_detection/output/FP32/Transportation/object_detection/face/pruned_mobilenet_reduced_ssd_shared_weights/dldt/face-detection-adas-0001.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name face-detection-adas-0001 --output_dir /opt/openvino_toolkit/models/face_detection/output/FP32
+  fi
+
+  if [ ! -f /opt/openvino_toolkit/models/face_detection/output/FP16/Transportation/object_detection/face/pruned_mobilenet_reduced_ssd_shared_weights/dldt/face-detection-adas-0001-fp16.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name face-detection-adas-0001-fp16 --output_dir /opt/openvino_toolkit/models/face_detection/output/FP16
+  fi
+
+  if [ ! -f /opt/openvino_toolkit/models/age-gender-recognition/output/FP32/Retail/object_attributes/age_gender/dldt/age-gender-recognition-retail-0013.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name age-gender-recognition-retail-0013 --output_dir /opt/openvino_toolkit/models/age-gender-recognition/output/FP32
+  fi
+
+  if [ ! -f /opt/openvino_toolkit/models/emotions-recognition/output/FP32/Retail/object_attributes/emotions_recognition/0003/dldt/emotions-recognition-retail-0003.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name emotions-recognition-retail-0003 --output_dir /opt/openvino_toolkit/models/emotions-recognition/output/FP32
+  fi
+
+  if [ ! -f /opt//openvino_toolkit/models/head-pose-estimation/output/FP32/Transportation/object_attributes/headpose/vanilla_cnn/dldt/head-pose-estimation-adas-0001.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name head-pose-estimation-adas-0001 --output_dir /opt/openvino_toolkit/models/head-pose-estimation/output/FP32
+  fi
+
+  if [ ! -f /opt/openvino_toolkit/models/person-detection/output/FP32/Retail/object_detection/pedestrian/rmnet_ssd/0013/dldt/person-detection-retail-0013.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name person-detection-retail-0013 --output_dir /opt/openvino_toolkit/models/person-detection/output/FP32
+  fi
+
+  if [ ! -f /opt/openvino_toolkit/models/person-reidentification/output/FP32/Retail/object_reidentification/pedestrian/rmnet_based/0076/dldt/person-reidentification-retail-0076.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name person-reidentification-retail-0076 --output_dir /opt/openvino_toolkit/models/person-reidentification/output/FP32
+  fi
+
+  if [ ! -f /opt/openvino_toolkit/models/vehicle-license-plate-detection/output/FP32/Security/object_detection/barrier/0106/dldt/vehicle-license-plate-detection-barrier-0106.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name vehicle-license-plate-detection-barrier-0106 --output_dir /opt/openvino_toolkit/models/vehicle-license-plate-detection/output/FP32
+  fi
+
+  if [ ! -f /opt/openvino_toolkit/models/vehicle-attributes-recongnition/output/FP32/Security/object_attributes/vehicle/resnet10_update_1/dldt/vehicle-attributes-recognition-barrier-0039.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name vehicle-attributes-recognition-barrier-0039 --output_dir /opt/openvino_toolkit/models/vehicle-attributes-recongnition/output/FP32
+  fi
+
+  if [ ! -f /opt/openvino_toolkit/models/license-plate-recognition/output/FP32/Security/optical_character_recognition/license_plate/dldt/license-plate-recognition-barrier-0001.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name license-plate-recognition-barrier-0001 --output_dir /opt/openvino_toolkit/models/license-plate-recognition/output/FP32
+  fi
+
+  if [ ! -f /opt/openvino_toolkit/models/landmarks-regression/output/FP32/Retail/object_attributes/landmarks_regression/0009/dldt/landmarks-regression-retail-0009.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name landmarks-regression-retail-0009 --output_dir /opt/openvino_toolkit/models/landmarks-regression/output/FP32
+  fi
+
+  if [ ! -f /opt/openvino_toolkit/models/face-reidentification/output/FP32/Retail/object_reidentification/face/mobilenet_based/dldt/face-reidentification-retail-0095.bin ]; then
+    cd /opt/intel/openvino/deployment_tools/tools/model_downloader
+    sudo python3 downloader.py --num_attempts 3 --name face-reidentification-retail-0095 --output_dir /opt/openvino_toolkit/models/face-reidentification/output/FP32
+  fi
+
+  echo "Install OPENVINO SUCCESS!"
+}
+
+config_usb_rules()
+{
+  # Configure the Neural Compute Stick USB Driver
+  sudo bash -c 'cat << EOF > /etc/udev/rules.d/97-usbboot.rules
+SUBSYSTEM=="usb", ATTRS{idProduct}=="2150", ATTRS{idVendor}=="03e7", GROUP="users", MODE="0666", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="usb", ATTRS{idProduct}=="2485", ATTRS{idVendor}=="03e7", GROUP="users", MODE="0666", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="usb", ATTRS{idProduct}=="f63b", ATTRS{idVendor}=="03e7", GROUP="users", MODE="0666", ENV{ID_MM_DEVICE_IGNORE}="1"
+EOF'
+
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger
+  sudo ldconfig
+}
+
+install_openvino_deps()
+{
+  sudo apt-get install -y libcairo2-dev libpango1.0-dev libglib2.0-dev \
+    libgtk2.0-dev libswscale-dev libavcodec-dev libavformat-dev \
+    libgstreamer1.0-0 gstreamer1.0-plugins-base \
+    build-essential cmake libusb-1.0-0-dev libdrm-dev
+
+  sudo -E apt-get install -y libpng-dev
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger
+  sudo ldconfig
+}
+
+release_package()
+{
+  echo "Install openvino to rootfs"
+  RELEASE_DIR=${1}
+  ROOTFS=${RELEASE_DIR}/rootfs
+
+  sudo rm -rf "$ROOTFS"/opt/intel
+  sudo mkdir "$ROOTFS"/opt/intel -p
+  sudo cp -rf /opt/intel "$ROOTFS"/opt/
+
+  sudo mkdir "$ROOTFS"/opt/openvino_toolkit/models/ -p
+  sudo cp -rf /opt/openvino_toolkit/models/* "$ROOTFS"/opt/openvino_toolkit/models/
+
+  sudo mkdir "$ROOTFS"/etc/udev/rules.d -p
+  sudo cp -rf /etc/udev/rules.d/97-usbboot.rules "$ROOTFS"/etc/udev/rules.d/97-usbboot.rules
+
+  # add install command to install.sh
+  declare -f install_openvino_deps>> "${RELEASE_DIR}"/install.sh
+  echo "install_openvino_deps" >> "${RELEASE_DIR}"/install.sh
+
+}
+
+#
+# Main entry to build deps
+#
+main()
+{
+  if [[ "$DEFAULT_INSTALL" != "true" ]]; then
+    echo "Default not install, skip"
+    exit
+  fi
+
+  TARGET_DIR=${1}
+  RELEASE_OPT=${2}
+  RELEASE_DIR=${3}
+
+  if [ ! -d "${TARGET_DIR}" ]; then
+    mkdir "${TARGET_DIR}" -p
+    echo "No such directory, create \"${TARGET_DIR}\""
+  fi
+
+  # Install files to rootfs with --release
+  if [[ "$RELEASE_OPT" == "--release" && "$RELEASE_DIR" != "" ]];then
+    release_package "${RELEASE_DIR}"
+    exit
+  fi
+
+  install_openvino_deps
+  build_openvino "${TARGET_DIR}"
+  config_usb_rules
+}
+
+main "$@"
