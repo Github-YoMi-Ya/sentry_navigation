@@ -41,6 +41,8 @@ ros2 launch nav2_sentry_bringup navigation2_cartographer.launch.py
 
 
 # 项目结构图
+
+```
 ├── Lakibeam_ROS2_Driver-main
 │   ├── assets
 │   ├── include
@@ -89,6 +91,8 @@ ros2 launch nav2_sentry_bringup navigation2_cartographer.launch.py
     ├── docs
     │   └── source
     └── scripts
+```
+
 
 
 
